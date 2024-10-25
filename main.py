@@ -1,18 +1,20 @@
 from fastapi import FastAPI, HTTPException, Depends
 from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, text
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.dialects.mysql import JSON  # For MySQL JSON datatype
 from passlib.context import CryptContext
-from fastapi.middleware.cors import CORSMiddleware
+from datetime import datetime
+from typing import List
 
-# Database URL
+
 DATABASE_URL = "mysql+pymysql://root:vinikaviya2003@localhost:3306/betting"
 
-# Password hashing context
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Database setup
+
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -26,23 +28,42 @@ def create_database_if_not_exists():
         except OperationalError as e:
             print(f"Error creating database: {e}")
 
-# Call the function to create the database
 create_database_if_not_exists()
 
-# Table Definition
+
 class User(Base):
     __tablename__ = "user_register"
     id = Column(Integer, primary_key=True, index=True)
     full_name = Column(String(100))
     date_of_birth = Column(String(20))
-    email = Column(String(100), unique=True)  # Ensure unique email
-    hashed_password = Column(String(255))  # Store hashed password
+    email = Column(String(100), unique=True)  
+    hashed_password = Column(String(255))  
     phone = Column(String(15))
 
-# Create the table
-Base.metadata.create_all(bind=engine)
+# Table Definition for Admin
+class Admin(Base):
+    __tablename__ = "admin"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(100), unique=True)
+    hashed_password = Column(String(255))
 
-# Pydantic models for request bodies
+# Table Definition for Cricket Match Event
+class CricketMatchEvent(Base):
+    __tablename__ = "cricket_match"
+    id = Column(Integer, primary_key=True, index=True)
+    match_name = Column(String(100), nullable=False)
+    team_1 = Column(String(255), nullable=False)
+    team_2 = Column(String(255), nullable=False)
+    match_date = Column(DateTime, nullable=False)
+    venue = Column(String(255), nullable=False)
+    
+ 
+    team_1_players = Column(JSON, nullable=False)  
+    team_2_players = Column(JSON, nullable=False)  
+
+# ------------------------Pydantic models -------------------------------
+
+
 class UserRequest(BaseModel):
     full_name: str
     date_of_birth: str
@@ -54,10 +75,33 @@ class UserLogin(BaseModel):
     email: str
     password: str
 
-# FastAPI instance
+class AdminRequest(BaseModel):
+    email: str
+    password: str
+
+class AdminLogin(BaseModel):
+    email: str
+    password: str
+
+class CricketMatchEventCreate(BaseModel):
+    match_name: str
+    team_1: str
+    team_2: str
+    match_date: datetime
+    venue: str
+    team_1_players: List[str]
+    team_2_players: List[str]
+
+class CricketMatchEventOut(CricketMatchEventCreate):
+    id: int
+
+    class Config:
+        from_attributes = True  # Pydantic V2 replacement for orm_mode
+
+
 app = FastAPI()
 
-# Dependency to get DB session
+
 def get_db():
     db = SessionLocal()
     try:
@@ -65,16 +109,24 @@ def get_db():
     finally:
         db.close()
 
-# Helper function to hash passwords
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
-# Helper function to verify passwords
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
-# Endpoint to add user data
-@app.post("/user/")
+@app.on_event("startup")
+def on_startup():
+    try:
+        with engine.connect() as connection:
+            print("Database connection successful.")
+            Base.metadata.create_all(bind=engine)
+    except OperationalError as e:
+        print(f"Database connection failed: {e}")
+
+# -----------------------Endpoint to add user data---------------------------------
+
+@app.post("/user_register/")
 def create_user(user: UserRequest, db: Session = Depends(get_db)):
     # Check if the email already exists
     existing_user = db.query(User).filter(User.email == user.email).first()
@@ -105,101 +157,89 @@ def create_user(user: UserRequest, db: Session = Depends(get_db)):
         },
     }
 
-# Endpoint for user login
-@app.post("/login/")
+#-------------------- User Login and Fetch Cricket Events----------------------------
+
+@app.post("/user_login/")
 def login(user: UserLogin, db: Session = Depends(get_db)):
-    # Query the database for the user
     db_user = db.query(User).filter(User.email == user.email).first()
-    
-    # Check if user exists and password matches
+
     if not db_user or not verify_password(user.password, db_user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     
+    matches = db.query(CricketMatchEvent).all()
+    formatted_matches=[f"{match.team_1}vs{match.team_2}"for match in matches]
+
     return {
-        "message": "Login successful",
-        "user": {
-            "id": db_user.id,
-            "full_name": db_user.full_name,
-            "email": db_user.email,
-            "phone": db_user.phone,
-        },
+        "matches": formatted_matches  
     }
 
+# --------------------------Endpoint to add admin data-------------------------
 
-#----------------------- ADMIN LOGIN----------------------
-
-
-class AdminRequest(BaseModel):
-    email: str
-    password: str
-
-
-
-class Admin(Base):
-    __tablename__= "admin"
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String(100), unique=True)
-    hashed_password = Column(String(255))
-
-
-# Endpoint to add admin data
-@app.post("/admin/")
+@app.post("/admin_register/")
 def create_admin(admin: AdminRequest, db: Session = Depends(get_db)):
-    try:
-        # Check if the admin email already exists
-        existing_admin = db.query(Admin).filter(Admin.email == admin.email).first()
-        if existing_admin:
-            raise HTTPException(status_code=400, detail="Admin email is already registered")
-        
-        # Hash the password before storing
-        hashed_password = hash_password(admin.password)
-        
-        db_admin = Admin(
-            email=admin.email,
-            hashed_password=hashed_password,
-        )
-        db.add(db_admin)
-        db.commit()
-        db.refresh(db_admin)
-        return {"message": "Admin created successfully", "admin_id": db_admin.id}
+    # Check if the admin email already exists
+    existing_admin = db.query(Admin).filter(Admin.email == admin.email).first()
+    if existing_admin:
+        raise HTTPException(status_code=400, detail="Admin email already registered")
     
-    except Exception as e:
-        print(f"Error creating admin: {e}")
-        raise HTTPException(status_code=500, detail="An error occurred while creating admin")
+    # Hash the password before storing
+    hashed_password = hash_password(admin.password)
+    
+    db_admin = Admin(
+        email=admin.email,
+        hashed_password=hashed_password,
+    )
+    db.add(db_admin)
+    db.commit()
+    db.refresh(db_admin)
+    return {"message": "Admin created successfully", "admin_id": db_admin.id}
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Change this to your frontend URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ----------------------Admin Login and Fetch Cricket Events------------------
 
-class AdminLogin(BaseModel):
-    email: str
-    password: str
-
-# Endpoint for admin login
-@app.post("/adminlogin/")
+@app.post("/admin_login/")
 def admin_login(admin: AdminLogin, db: Session = Depends(get_db)):
-    try:
-        # Query the database for the admin
-        db_admin = db.query(Admin).filter(Admin.email == admin.email).first()
-        
-        # Check if admin exists and password matches
-        if not db_admin or not verify_password(admin.password, db_admin.hashed_password):
-            raise HTTPException(status_code=401, detail="Invalid admin credentials")
+    # Query the database for the admin
+    db_admin = db.query(Admin).filter(Admin.email == admin.email).first()
 
-        return {
-            "message": "Admin login successful",
-            "admin": {
-                "id": db_admin.id,
-                "email": db_admin.email,
-            },
-        }
+    # Check if admin exists and password matches
+    if not db_admin or not verify_password(admin.password, db_admin.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid admin credentials")
+
+    # Fetch all cricket matches after successful login
+    matches = db.query(CricketMatchEvent).all()
+
+    return {
+        "matches": matches  # Returning the cricket events
+    }
+
+# ---------------------POST endpoint to create a cricket match event-----------------------
+
+@app.post("/cricket_event/", response_model=CricketMatchEventOut)
+def create_cricket_event(event: CricketMatchEventCreate, db: Session = Depends(get_db)):
+    try:
+        # Create a new cricket match event in the database
+        db_event = CricketMatchEvent(
+            match_name=event.match_name,
+            team_1=event.team_1,
+            team_2=event.team_2,
+            match_date=event.match_date,
+            venue=event.venue,
+            team_1_players=event.team_1_players,  # List of players for team 1
+            team_2_players=event.team_2_players   # List of players for team 2
+        )
+        db.add(db_event)
+        db.commit()
+        db.refresh(db_event)
+
+        return db_event  
     except Exception as e:
-        print(f"Error during admin login: {e}")
-        raise HTTPException(status_code=500, detail="Invalid mail and password")
+        db.rollback()  
+        raise HTTPException(status_code=500, detail=f"Error creating event: {str(e)}")
+
+# GET endpoint to retrieve all matches
+@app.get("/matches/", response_model=List[CricketMatchEventOut])
+def get_matches(db: Session = Depends(get_db)):
+    return db.query(CricketMatchEvent).all()
 
 
 
