@@ -1,4 +1,3 @@
-# user.py
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -79,5 +78,5 @@ def get_match(match_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Match not found")
 
     return {
-        "match": match  # Return the specific match details
+        "match": match 
     }
